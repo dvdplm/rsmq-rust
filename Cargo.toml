@@ -4,4 +4,5 @@ version = "0.1.0"
 authors = ["David Palm <dvdplm@gmail.com>"]
 
 [dependencies]
-redis-rs = "*"
+redis = "0.8"
+#  TOOD r2d2
