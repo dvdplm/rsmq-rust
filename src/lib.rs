@@ -54,14 +54,14 @@ impl Rsmq {
     }
 
     // TODO: the JS original takes a map and uses only the `qname` member to delete the queue. I think the Rust version should just take the queue name directly.
-    pub fn delete_queue(&self, opts: QueueOpts) -> RedisResult<Value> {
+    pub fn delete_queue(&self, qname: &str) -> RedisResult<Value> {
         let con = self.client.get_connection()?;
-        let key = format!("{}:{}", REDIS_NS, opts.qname);
+        let key = format!("{}:{}", REDIS_NS, qname);
         redis::pipe()
             .atomic()
             .cmd("DEL").arg(format!("{}:Q", &key)).ignore() // The queue hash
             .cmd("DEL").arg(&key).ignore() // The messages zset
-            .cmd("SREM").arg(format!("{}:QUEUES", REDIS_NS)).arg(opts.qname).ignore()
+            .cmd("SREM").arg(format!("{}:QUEUES", REDIS_NS)).arg(qname).ignore()
             .query(&con)
     }
     pub fn list_queues(&self) -> RedisResult<Vec<String>> {
