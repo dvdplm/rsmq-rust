@@ -1,4 +1,4 @@
-A Rust implementation of [RSMQ](http://smrchy.github.io/rsmq/about/).
+A Rust implementation of [RSMQ](https://smrchy.github.io/rsmq/about/) (Redis Simple Message Queue).
 
 ## Installation
 
