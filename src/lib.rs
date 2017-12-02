@@ -2,8 +2,8 @@ extern crate redis;
 
 use redis::{RedisResult, Value, RedisError};
 
-static REDIS_NS: &str = "rsmq";
-static PONG: &str = "PONG";
+const REDIS_NS: &str = "rsmq";
+const PONG: &str = "PONG";
 
 #[derive(Clone, Debug)]
 pub struct QueueOpts {
@@ -41,8 +41,6 @@ impl Rsmq {
         let con = self.client.get_connection()?;
         let key = format!("{}:{}:Q", REDIS_NS, opts.qname);
         let (ts, _): (u32, u32) = redis::cmd("TIME").query(&con)?;
-        // TODO: default values for the queue: vt: 30, delay: 0, maxsize: 65536
-        // println!("NOW, ts: {:?}", ts);
         let res = redis::pipe()
             .atomic()
             .cmd("HSETNX").arg(&key).arg("vt").arg(opts.vt).ignore()
@@ -52,9 +50,10 @@ impl Rsmq {
             .cmd("HSETNX").arg(&key).arg("modified").arg(ts) .ignore()
             .cmd("SADD").arg(format!("{}:QUEUES", REDIS_NS)).arg(opts.qname)
             .query::<Value>(&con)?;
-        // println!("result: {:?}", res);
         Ok(res)
     }
+
+    // TODO: the JS original takes a map and uses only the `qname` member to delete the queue. I think the Rust version should just take the queue name directly.
     pub fn delete_queue(&self, opts: QueueOpts) -> RedisResult<Value> {
         let con = self.client.get_connection()?;
         let key = format!("{}:{}", REDIS_NS, opts.qname);
@@ -64,6 +63,11 @@ impl Rsmq {
             .cmd("DEL").arg(&key).ignore() // The messages zset
             .cmd("SREM").arg(format!("{}:QUEUES", REDIS_NS)).arg(opts.qname).ignore()
             .query(&con)
+    }
+    pub fn list_queues(&self) -> RedisResult<Vec<String>> {
+        let con = self.client.get_connection()?;
+        let key = format!("{}:QUEUES", REDIS_NS);
+        redis::cmd("SMEMBERS").arg(key).query(&con)
     }
 }
 

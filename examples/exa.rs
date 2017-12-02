@@ -14,7 +14,8 @@ fn main() {
   };
   rsmq.create_queue(qopts.clone()).expect("q creation failed");
   println!("created queue {}", qopts.qname);
+  let qs = rsmq.list_queues().expect("Nope, no listing for you");
+  println!("List queues: {:?}", qs);
   rsmq.delete_queue(rsmq::QueueOpts{qname: "ha".into(), .. Default::default()}).expect("q deletion failed");
   println!("deleted queue {}", qopts.qname);
-
 }
