@@ -3,7 +3,7 @@ extern crate num_bigint;
 extern crate rand;
 
 use num_bigint::BigUint;
-use redis::{RedisResult, Value, RedisError};
+use redis::{RedisResult, Value, RedisError, from_redis_value};
 
 const REDIS_NS: &str = "rsmq";
 const PONG: &str = "PONG";
@@ -38,6 +38,44 @@ impl Default for QueueOpts {
             delay: 0,
             maxsize: 65536,
             ts: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Message {
+    pub id: String,
+    pub message: String,
+    pub rc: u64, // Receive count
+    pub fr: u64, // First receive time
+    pub sent: u64,
+}
+
+impl Message {
+    pub fn new() -> Message {
+        Message {
+            id: "".into(), message: "".into(), sent:0, fr:0, rc:0
+        }
+    }
+}
+impl redis::FromRedisValue for Message {
+    fn from_redis_value(v: &Value) -> RedisResult<Message> {
+        match *v {
+            Value::Bulk(ref items) => {
+                let mut m = Message::new();
+                m.id = from_redis_value(&items[0])?;
+                m.message = from_redis_value(&items[1])?;
+                m.rc = from_redis_value(&items[2])?;
+                m.fr = from_redis_value(&items[3])?;
+                Ok(m)
+            },
+            _ => {
+                // println!("Oh boy, what even are you? {:?}", v);
+                // TODO: figure out how to return something sensible here
+                let custom_error = std::io::Error::new(std::io::ErrorKind::Other, "Redis did not return a bulk");
+                let redis_err = RedisError::from(custom_error);
+                return Err(redis_err)
+            }
         }
     }
 }
@@ -96,7 +134,7 @@ impl Rsmq {
         redis::cmd("SMEMBERS").arg(key).query(&con)
     }
 
-    fn get_queue(&self, qname: &str, set_uid: bool) -> RedisResult<QueueOpts>{
+    fn get_queue(&self, qname: &str, set_uid: bool) -> RedisResult<QueueOpts> {
         let qkey = format!("{}:{}:Q", REDIS_NS, qname);
         let out: Vec<Vec<u64>> = redis::pipe().atomic()
             .cmd("HMGET").arg(qkey).arg("vt").arg("delay").arg("maxsize")
@@ -123,7 +161,7 @@ impl Rsmq {
         Ok(q)
     }
 
-    pub fn change_message_visibility(&self, qname: &str, msgid: &str, hide_for: u64) -> Result<u64, RedisError> {
+    pub fn change_message_visibility(&self, qname: &str, msgid: &str, hidefor: u64) -> Result<u64, RedisError> {
         const LUA : &'static str = r#"
             local msg = redis.call("ZSCORE", KEYS[1], KEYS[2])
 			if not msg then
@@ -133,9 +171,8 @@ impl Rsmq {
 			return 1"#;
         let q = self.get_queue(&qname, false)?;
         let queue_key = format!("{}:{}", REDIS_NS, qname);
-        let expires_at = q.ts + hide_for * 1000u64;
+        let expires_at = q.ts + hidefor * 1000u64;
         redis::Script::new(LUA)
-            .key(3)
             .key(queue_key)
             .key(msgid)
             .key(expires_at)
@@ -143,11 +180,10 @@ impl Rsmq {
         Ok(expires_at)
     }
 
-    pub fn send_message(&self, qname: &str, message: &str, mut delay: Option<u64>) -> Result<String, RedisError> {
+    pub fn send_message(&self, qname: &str, message: &str, delay: Option<u64>) -> Result<String, RedisError> {
         let q = self.get_queue(qname, true)?;
-        if delay.is_none() {
-            delay = Some(q.delay);
-        }
+        let delay = delay.unwrap_or(q.delay);
+
         if q.maxsize != -1 && message.len() > q.maxsize as usize { // TODO: len() is utf8 chars; maxsize is bytes
             let custom_error = std::io::Error::new(std::io::ErrorKind::Other, "Message is too long");
             let redis_err = RedisError::from(custom_error);
@@ -156,7 +192,7 @@ impl Rsmq {
         let key = format!("{}:{}", REDIS_NS, qname);
         let qky = format!("{}:Q", key);
         redis::pipe().atomic()
-            .cmd("ZADD").arg(&key).arg(q.ts + delay.unwrap() * 1000).arg(&q.uid).ignore()
+            .cmd("ZADD").arg(&key).arg(q.ts + delay * 1000).arg(&q.uid).ignore()
             .cmd("HSET").arg(&qky).arg(&q.uid).arg(message).ignore()
             .cmd("HINCRBY").arg(&qky).arg("totalsent").arg(1).ignore()
             .query::<()>(&self.con)?;
@@ -175,6 +211,39 @@ impl Rsmq {
         } else {
             Ok(0)
         }
+    }
+
+    pub fn receive_message(&self, qname: &str, hidefor: Option<u64>) -> Result<Message, RedisError> {
+        const LUA : &'static str = r##"
+            local msg = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", KEYS[2], "LIMIT", "0", "1")
+			if #msg == 0 then
+				return {}
+			end
+			redis.call("ZADD", KEYS[1], KEYS[3], msg[1])
+			redis.call("HINCRBY", KEYS[1] .. ":Q", "totalrecv", 1)
+			local mbody = redis.call("HGET", KEYS[1] .. ":Q", msg[1])
+			local rc = redis.call("HINCRBY", KEYS[1] .. ":Q", msg[1] .. ":rc", 1)
+			local o = {msg[1], mbody, rc}
+			if rc==1 then
+				redis.call("HSET", KEYS[1] .. ":Q", msg[1] .. ":fr", KEYS[2])
+				table.insert(o, KEYS[2])
+			else			
+				local fr = redis.call("HGET", KEYS[1] .. ":Q", msg[1] .. ":fr")
+				table.insert(o, fr)
+			end
+			return o
+            "##;
+        let q = self.get_queue(qname, false)?;
+        let hidefor = hidefor.unwrap_or(q.vt);
+        let qky = format!("{}:{}", REDIS_NS, qname);
+        let expires_at = q.ts + hidefor * 1000u64;
+        
+        let m : Message = redis::Script::new(LUA)
+            .key(qky)
+            .key(q.ts)
+            .key(expires_at)
+            .invoke(&self.con)?;
+        Ok(m)
     }
 }
 
