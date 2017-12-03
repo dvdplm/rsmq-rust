@@ -12,9 +12,8 @@ fn main() {
   println!("[main] List queues: {:?}", qs);
   let msgid = rsmq.send_message("my-queue", "hejhopplingonsnopp", None).expect("no, did not send that");
   println!("[main] Message ID: {}", msgid);
-  let o = rsmq.change_message_visibility("my-queue", &msgid, 500);
-  println!("[main] change message visibility: {:?}", o);
-
+  // let o = rsmq.change_message_visibility("my-queue", &msgid, 500);
+  // println!("[main] change message visibility: {:?}", o);
   let m = rsmq.receive_message("my-queue", None);
   println!("[main] reserved a message: {:?}", m);
 

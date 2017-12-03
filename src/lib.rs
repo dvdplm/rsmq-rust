@@ -67,6 +67,8 @@ impl redis::FromRedisValue for Message {
                 m.message = from_redis_value(&items[1])?;
                 m.rc = from_redis_value(&items[2])?;
                 m.fr = from_redis_value(&items[3])?;
+                // TODO: figure out how to wrap a std::num::ParseIntError in a RedisError so we can use `?` here
+                m.sent = u64::from_str_radix(&m.id[0..10], 36).expect("could not convert first 10 chars from redis response to timestamp");
                 Ok(m)
             },
             _ => {
@@ -153,7 +155,7 @@ impl Rsmq {
             ts: ts,
         };
         if set_uid {
-            let ts_str = format!("{}{:06}", secs, micros);
+            let ts_str = format!("{}{:06}", secs, micros); // This is a bit nuts; double check JS behavior
             let ts_rad36 = BigUint::parse_bytes(ts_str.as_bytes(), 10).unwrap().to_str_radix(36);
             q.uid = ts_rad36 + &make_id_22()
         }   
