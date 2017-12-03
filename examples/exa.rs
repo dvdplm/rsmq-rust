@@ -14,6 +14,8 @@ fn main() {
   println!("Message ID: {}", msgid);
   let o = rsmq.change_message_visibility("my-queue", &msgid, 500);
   println!("change message visibility: {:?}", o);
+  let o2 = rsmq.delete_message("my-queue", &msgid);
+  println!("delete message: {:?}", o2);
   rsmq.delete_queue("my-queue").expect("q deletion failed");
   // println!("deleted queue {}", qopts.qname);
 }

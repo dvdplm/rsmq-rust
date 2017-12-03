@@ -162,6 +162,20 @@ impl Rsmq {
             .query::<()>(&self.con)?;
         Ok(q.uid)
     }
+
+    pub fn delete_message(&self, qname: &str, msgid: &str) -> Result<u64, RedisError> {
+        let key = format!("{}:{}", REDIS_NS, qname);
+        let res : Vec<u64> = redis::pipe().atomic()
+            .cmd("ZREM").arg(&key).arg(msgid)
+            .cmd("HDEL").arg(format!("{}:Q", &key)).arg(msgid).arg(format!("{}:rc", &key)).arg(format!("{}:fr", &key))
+            .query(&self.con)?;
+
+        if res[0] == 1 && res[1] > 0 {
+            Ok(1)
+        } else {
+            Ok(0)
+        }
+    }
 }
 
 fn make_id_22() -> String {
