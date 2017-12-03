@@ -3,7 +3,7 @@ name = "rsmq"
 description = "A Rust implementation of [RSMQ](https://smrchy.github.io/rsmq/about/) (Redis Simple Message Queue)."
 license = "MIT"
 repository = "https://github.com/dvdplm/rsmq-rust"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["David Palm <dvdplm@gmail.com>"]
 
 [dependencies]
