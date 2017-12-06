@@ -16,18 +16,22 @@ const REDIS_NS: &str = "rsmq";
 const PONG: &str = "PONG";
 
 #[derive(Clone, Debug)]
-pub struct QueueOpts {
-    uid: String,
+pub struct Queue {
     pub qname: String,
     pub vt: u64,
     pub delay: u64,
     pub maxsize: i64,
-    ts: u64,
+    pub totalrecv: u64,
+    pub totalsent: u64,
+    pub created: u64,
+    pub modified: u64,
+    pub msgs: u64,       // current message count
+    pub hiddenmsgs: u64, // hidden, aka "in-flight" messages + delayed messages
 }
 
-impl QueueOpts {
-    pub fn new(qname: &str, vt: u64, delay: u64, maxsize: i64) -> QueueOpts {
-        let mut q = QueueOpts {..Default::default()};
+impl Queue {
+    pub fn new(qname: &str, vt: u64, delay: u64, maxsize: i64) -> Queue {
+        let mut q = Queue {..Default::default()};
         q.qname = qname.into();
         q.vt = vt;
         q.delay = delay;
@@ -36,15 +40,19 @@ impl QueueOpts {
     }
 }
 
-impl Default for QueueOpts {
-    fn default() -> QueueOpts {
-        QueueOpts {
-            uid: "".into(), // I think this is what becomes the *message* ID. It is stored on the queue in memory for some to me unknown reason
+impl Default for Queue {
+    fn default() -> Queue {
+        Queue {
             qname: "".into(),
             vt: 30,
             delay: 0,
             maxsize: 65536,
-            ts: 0,
+            totalrecv: 0,
+            totalsent: 0,
+            created: 0,
+            modified: 0,
+            msgs: 0,
+            hiddenmsgs: 0,
         }
     }
 }
@@ -69,6 +77,12 @@ impl redis::FromRedisValue for Message {
     fn from_redis_value(v: &Value) -> RedisResult<Message> {
         match *v {
             Value::Bulk(ref items) => {
+                if items.len() == 0 {
+                    // TODO: figure out error handling and get rid of this awefulness
+                    let custom_error = std::io::Error::new(std::io::ErrorKind::Other, "No messages to receive");
+                    let redis_err = RedisError::from(custom_error);
+                    return Err(redis_err)
+                }
                 let mut m = Message::new();
                 m.id = from_redis_value(&items[0])?;
                 m.message = from_redis_value(&items[1])?;
@@ -112,7 +126,7 @@ impl Rsmq {
         Ok(Rsmq { pool: pool })
     }
 
-    pub fn create_queue(&self, opts: QueueOpts) -> RsmqResult<usize> {
+    pub fn create_queue(&self, opts: Queue) -> RsmqResult<usize> {
         let con = self.pool.get()?;
         let key = format!("{}:{}:Q", REDIS_NS, opts.qname);
         let (ts, _): (u32, u32) = redis::cmd("TIME").query(con.deref())?;
@@ -145,7 +159,7 @@ impl Rsmq {
         redis::cmd("SMEMBERS").arg(key).query(con.deref()).map_err(|e| e.into())
     }
 
-    fn get_queue(&self, qname: &str, set_uid: bool) -> RsmqResult<QueueOpts> {
+    fn get_queue(&self, qname: &str, set_uid: bool) -> RsmqResult<(Queue, u64, Option<String>)> {
         let qkey = format!("{}:{}:Q", REDIS_NS, qname);
         let con = self.pool.get()?;
         let out: Vec<Vec<u64>> = redis::pipe().atomic()
@@ -159,24 +173,24 @@ impl Rsmq {
         let secs = out[1][0];
         let micros = out[1][1];
         let ts = (secs * 1_000_000 + micros)/1_000; // Epoch time in milliseconds
-        let mut q = QueueOpts {
+        let q = Queue {
             qname: qname.into(),
-            uid: "".into(),
             vt: qattrs[0],
             delay: qattrs[1],
             maxsize: qattrs[2] as i64,
-            ts: ts,
+            .. Default::default()
         };
         // This is a bit crazy. The JS version calls getQueue with the `set_uid` set to `true` only from `sendMessage`
         // where it is used to write the timestamp+random stuff that constituates the (sort)key. This is just a port of
         // that behavior. I don't understand why it is baked in with the queue attrib fetch.
-        if set_uid {
+        let uid = if set_uid {
             let ts_str = format!("{}{:06}", secs, micros); // This is a bit nuts; double check JS behavior
             let ts_rad36 = BigUint::parse_bytes(ts_str.as_bytes(), 10).unwrap().to_str_radix(36);
-            q.uid = ts_rad36 + &make_id_22()
-        }   
-        
-        Ok(q)
+            Some(ts_rad36 + &make_id_22())
+        } else {
+            None
+        };
+        Ok((q, ts, uid))
     }
 
     pub fn change_message_visibility(&self, qname: &str, msgid: &str, hidefor: u64) -> RsmqResult<u64> {
@@ -187,9 +201,9 @@ impl Rsmq {
 			end
 			redis.call("ZADD", KEYS[1], KEYS[3], KEYS[2])
 			return 1"#;
-        let q = self.get_queue(&qname, false)?;
+        let (_, ts, _) = self.get_queue(&qname, false)?;
         let queue_key = format!("{}:{}", REDIS_NS, qname);
-        let expires_at = q.ts + hidefor * 1000u64;
+        let expires_at = ts + hidefor * 1000u64;
         let con = self.pool.get()?;
         redis::Script::new(LUA)
             .key(queue_key)
@@ -200,7 +214,8 @@ impl Rsmq {
     }
 
     pub fn send_message(&self, qname: &str, message: &str, delay: Option<u64>) -> RsmqResult<String> {
-        let q = self.get_queue(qname, true)?;
+        let (q, ts, uid) = self.get_queue(&qname, true)?;
+        let uid = uid.unwrap();
         let delay = delay.unwrap_or(q.delay);
 
         if q.maxsize != -1 && message.len() > q.maxsize as usize { // TODO: len() is utf8 chars; maxsize is bytes
@@ -212,22 +227,23 @@ impl Rsmq {
         let qky = format!("{}:Q", key);
         let con = self.pool.get()?;
         redis::pipe().atomic()
-            .cmd("ZADD").arg(&key).arg(q.ts + delay * 1000).arg(&q.uid).ignore()
-            .cmd("HSET").arg(&qky).arg(&q.uid).arg(message).ignore()
+            .cmd("ZADD").arg(&key).arg(ts + delay * 1000).arg(&uid).ignore()
+            .cmd("HSET").arg(&qky).arg(&uid).arg(message).ignore()
             .cmd("HINCRBY").arg(&qky).arg("totalsent").arg(1).ignore()
             .query::<()>(con.deref())?;
-        Ok(q.uid)
+        Ok(uid)
     }
 
     pub fn delete_message(&self, qname: &str, msgid: &str) -> RsmqResult<u64> {
         let key = format!("{}:{}", REDIS_NS, qname);
         let con = self.pool.get()?;
-        let res : Vec<u64> = redis::pipe().atomic()
+        // let res : Vec<u64> = redis::pipe().atomic()
+        let (delete_count, deleted_fields_count) : (u32, u32) = redis::pipe().atomic()
             .cmd("ZREM").arg(&key).arg(msgid)
             .cmd("HDEL").arg(format!("{}:Q", &key)).arg(msgid).arg(format!("{}:rc", &key)).arg(format!("{}:fr", &key))
             .query(con.deref())?;
 
-        if res[0] == 1 && res[1] > 0 {
+        if delete_count == 1 && deleted_fields_count > 0 {
             Ok(1)
         } else {
             Ok(0)
@@ -254,18 +270,50 @@ impl Rsmq {
 			end
 			return o
             "##;
-        let q = self.get_queue(qname, false)?;
+        let (q, ts, _) = self.get_queue(&qname, false)?;
         let hidefor = hidefor.unwrap_or(q.vt);
         let qky = format!("{}:{}", REDIS_NS, qname);
-        let expires_at = q.ts + hidefor * 1000u64;
+        let expires_at = ts + hidefor * 1000u64;
         let con = self.pool.get()?;
         
         let m : Message = redis::Script::new(LUA)
             .key(qky)
-            .key(q.ts)
+            .key(ts)
             .key(expires_at)
             .invoke(con.deref())?;
         Ok(m)
+    }
+
+    pub fn get_queue_attributes(&self, qname: &str) -> RsmqResult<Queue> {
+        // TODO: validate qname
+        let key = format!("{}:{}", REDIS_NS, qname);
+        let qkey = format!("{}:{}:Q", REDIS_NS, qname);
+        let con = self.pool.get()?;
+        // TODO: use transaction here to grab the time and then run the data fetch
+        let (time, _): (String, u32) = redis::cmd("TIME").query(con.deref())?;
+        let ts_str = format!("{}000",time);
+        // [[60, 10, 1200, 5, 7, 1512492628, 1512492628], 10, 9]
+        let out: ((u64, u64, i64, u64, u64, u64, u64), u64, u64) = redis::pipe().atomic()
+            .cmd("HMGET").arg(qkey).arg("vt").arg("delay").arg("maxsize").arg("totalrecv").arg("totalsent").arg("created").arg("modified")
+            .cmd("ZCARD").arg(&key)
+            .cmd("ZCOUNT").arg(&key).arg(ts_str).arg("+inf")
+            .query(con.deref())?;
+        let (vt, delay, maxsize, totalrecv, totalsent, created, modified) = out.0;
+        let msg_count = out.1;
+        let hidden_msg_count = out.2;
+        let q = Queue {
+            qname: qname.into(),
+            vt: vt,
+            delay: delay,
+            maxsize: maxsize,
+            totalrecv: totalrecv,
+            totalsent: totalsent,
+            created: created,
+            modified: modified,
+            msgs: msg_count,
+            hiddenmsgs: hidden_msg_count,
+        };
+        Ok(q)
     }
 }
 
