@@ -12,3 +12,6 @@ num-bigint = "0.1.41"
 rand = "0.3.18"
 r2d2 = "0.8.1"
 r2d2_redis_patch = "0.6.1"
+
+[dev-dependencies]
+criterion = "0.1.0"
