@@ -5,3 +5,4 @@ Cargo.lock
 *.rdb
 misc/
 .DS_Store
+.criterion
