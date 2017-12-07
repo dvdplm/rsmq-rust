@@ -3,7 +3,7 @@ extern crate rsmq;
 use rsmq::*;
 
 fn main() {
-  let rsmq = Rsmq::new("redis://127.0.0.1/").expect("Can't instantiate RSMQ");
+  let rsmq = Rsmq::new("redis://127.0.0.1/", "rsmq").expect("Can't instantiate RSMQ");
   println!("[main] Have rsmq instance: {:?}", rsmq);
   let qopts = Queue::new("my-queue", 60, 10, 1200);
   rsmq.create_queue(qopts).expect("queue creation failed");

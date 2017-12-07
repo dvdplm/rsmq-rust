@@ -12,7 +12,6 @@ use redis::{from_redis_value, RedisError, RedisResult, Value};
 use r2d2_redis::RedisConnectionManager;
 use r2d2::Pool;
 
-const REDIS_NS: &str = "rsmq";
 const PONG: &str = "PONG";
 
 #[derive(Clone, Debug)]
@@ -114,6 +113,7 @@ pub type RsmqResult<T> = Result<T, Box<Error>>;
 // #[derive(Debug)]
 pub struct Rsmq {
   pub pool: Pool<RedisConnectionManager>,
+  name_space: String,
 }
 
 impl std::fmt::Debug for Rsmq {
@@ -121,18 +121,19 @@ impl std::fmt::Debug for Rsmq {
 }
 
 impl Rsmq {
-  pub fn new<T: redis::IntoConnectionInfo>(params: T) -> Result<Rsmq, Box<Error>> {
-    let manager = RedisConnectionManager::new(params).expect("cannot instantiate connection manager");
+  pub fn new<T: redis::IntoConnectionInfo>(params: T, name_space: &str) -> Result<Rsmq, Box<Error>> {
+    let manager = RedisConnectionManager::new(params)?;
     let pool = r2d2::Pool::new(manager)?;
     let con = pool.get()?;
     let pong: String = redis::cmd("PING").query(con.deref())?; // TODO: it looks like the r2d2 setup code does this already so perhaps we can skip it
     assert_eq!(pong, PONG);
-    Ok(Rsmq { pool: pool })
+    let ns = if name_space != "" {name_space.into()} else {"rsmq".into()};
+    Ok(Rsmq { pool: pool, name_space: ns})
   }
 
   pub fn create_queue(&self, opts: Queue) -> RsmqResult<u8> {
     let con = self.pool.get()?;
-    let key = format!("{}:{}:Q", REDIS_NS, opts.qname);
+    let key = format!("{}:{}:Q", self.name_space, opts.qname);
     let (ts, _): (u32, u32) = redis::cmd("TIME").query(con.deref())?;
     let (res,): (u8,) = redis::pipe()
       .atomic()
@@ -162,7 +163,7 @@ impl Rsmq {
       .arg(ts)
       .ignore()
       .cmd("SADD")
-      .arg(format!("{}:QUEUES", REDIS_NS))
+      .arg(format!("{}:QUEUES", self.name_space))
       .arg(opts.qname)
       .query(con.deref())?;
     Ok(res)
@@ -170,18 +171,18 @@ impl Rsmq {
 
   pub fn delete_queue(&self, qname: &str) -> RsmqResult<Value> {
     let con = self.pool.get()?;
-    let key = format!("{}:{}", REDIS_NS, qname);
+    let key = format!("{}:{}", self.name_space, qname);
     redis::pipe()
             .atomic()
             .cmd("DEL").arg(format!("{}:Q", &key)).ignore() // The queue hash
             .cmd("DEL").arg(&key).ignore() // The messages zset
-            .cmd("SREM").arg(format!("{}:QUEUES", REDIS_NS)).arg(qname).ignore()
+            .cmd("SREM").arg(format!("{}:QUEUES", self.name_space)).arg(qname).ignore()
             .query(con.deref()).map_err(|e| e.into())
   }
 
   pub fn list_queues(&self) -> RsmqResult<Vec<String>> {
     let con = self.pool.get()?;
-    let key = format!("{}:QUEUES", REDIS_NS);
+    let key = format!("{}:QUEUES", self.name_space);
     redis::cmd("SMEMBERS")
       .arg(key)
       .query(con.deref())
@@ -190,7 +191,7 @@ impl Rsmq {
 
   fn get_queue(&self, qname: &str, set_uid: bool) -> RsmqResult<(Queue, u64, Option<String>)> {
     let con = self.pool.get()?;
-    let qkey = format!("{}:{}:Q", REDIS_NS, qname);
+    let qkey = format!("{}:{}:Q", self.name_space, qname);
     let ((vt, delay, maxsize), (secs, micros)): ((u64, u64, i64), (u64, u64)) = redis::pipe()
       .atomic()
       .cmd("HMGET")
@@ -233,7 +234,7 @@ impl Rsmq {
 			redis.call("ZADD", KEYS[1], KEYS[3], KEYS[2])
 			return 1"#;
     let (_, ts, _) = self.get_queue(&qname, false)?;
-    let queue_key = format!("{}:{}", REDIS_NS, qname);
+    let queue_key = format!("{}:{}", self.name_space, qname);
     let expires_at = ts + hidefor * 1000u64;
     let con = self.pool.get()?;
     redis::Script::new(LUA)
@@ -255,7 +256,7 @@ impl Rsmq {
       let redis_err = RedisError::from(custom_error);
       return Err(redis_err.into());
     }
-    let key = format!("{}:{}", REDIS_NS, qname);
+    let key = format!("{}:{}", self.name_space, qname);
     let qky = format!("{}:Q", key);
     let con = self.pool.get()?;
     redis::pipe()
@@ -280,7 +281,7 @@ impl Rsmq {
   }
 
   pub fn delete_message(&self, qname: &str, msgid: &str) -> RsmqResult<bool> {
-    let key = format!("{}:{}", REDIS_NS, qname);
+    let key = format!("{}:{}", self.name_space, qname);
     let con = self.pool.get()?;
     let (delete_count, deleted_fields_count): (u32, u32) = redis::pipe()
       .atomic()
@@ -323,7 +324,7 @@ impl Rsmq {
       "##;
     let (q, ts, _) = self.get_queue(&qname, false)?;
     let hidefor = hidefor.unwrap_or(q.vt);
-    let qky = format!("{}:{}", REDIS_NS, qname);
+    let qky = format!("{}:{}", self.name_space, qname);
     let expires_at = ts + hidefor * 1000u64;
     let con = self.pool.get()?;
 
@@ -337,8 +338,8 @@ impl Rsmq {
 
   pub fn get_queue_attributes(&self, qname: &str) -> RsmqResult<Queue> {
     // TODO: validate qname
-    let key = format!("{}:{}", REDIS_NS, qname);
-    let qkey = format!("{}:{}:Q", REDIS_NS, qname);
+    let key = format!("{}:{}", self.name_space, qname);
+    let qkey = format!("{}:{}:Q", self.name_space, qname);
     let con = self.pool.get()?;
     // TODO: use transaction here to grab the time and then run the data fetch
     let (time, _): (String, u32) = redis::cmd("TIME").query(con.deref())?;
