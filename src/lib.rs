@@ -137,34 +137,14 @@ impl Rsmq {
     let (ts, _): (u32, u32) = redis::cmd("TIME").query(con.deref())?;
     let (res,): (u8,) = redis::pipe()
       .atomic()
-      .cmd("HSETNX")
-      .arg(&key)
-      .arg("vt")
-      .arg(opts.vt)
-      .ignore()
-      .cmd("HSETNX")
-      .arg(&key)
-      .arg("delay")
-      .arg(opts.delay)
-      .ignore()
-      .cmd("HSETNX")
-      .arg(&key)
-      .arg("maxsize")
-      .arg(opts.maxsize)
-      .ignore()
-      .cmd("HSETNX")
-      .arg(&key)
-      .arg("created")
-      .arg(ts)
-      .ignore()
-      .cmd("HSETNX")
-      .arg(&key)
-      .arg("modified")
-      .arg(ts)
-      .ignore()
-      .cmd("SADD")
-      .arg(format!("{}:QUEUES", self.name_space))
-      .arg(opts.qname)
+      .cmd("HSETNX").arg(&key).arg("vt").arg(opts.vt) .ignore()
+      .cmd("HSETNX").arg(&key).arg("delay").arg(opts.delay) .ignore()
+      .cmd("HSETNX").arg(&key).arg("maxsize").arg(opts.maxsize) .ignore()
+      .cmd("HSETNX").arg(&key).arg("totalrecv").arg(0) .ignore()
+      .cmd("HSETNX").arg(&key).arg("totalsent").arg(0) .ignore()
+      .cmd("HSETNX").arg(&key).arg("created").arg(ts) .ignore()
+      .cmd("HSETNX").arg(&key).arg("modified").arg(ts) .ignore()
+      .cmd("SADD")  .arg(format!("{}:QUEUES", self.name_space)) .arg(opts.qname)
       .query(con.deref())?;
     Ok(res)
   }
@@ -194,11 +174,7 @@ impl Rsmq {
     let qkey = format!("{}:{}:Q", self.name_space, qname);
     let ((vt, delay, maxsize), (secs, micros)): ((u64, u64, i64), (u64, u64)) = redis::pipe()
       .atomic()
-      .cmd("HMGET")
-      .arg(qkey)
-      .arg("vt")
-      .arg("delay")
-      .arg("maxsize")
+      .cmd("HMGET").arg(qkey).arg("vt").arg("delay").arg("maxsize")
       .cmd("TIME")
       .query(con.deref())?;
 
@@ -247,11 +223,10 @@ impl Rsmq {
 
   pub fn send_message(&self, qname: &str, message: &str, delay: Option<u64>) -> RsmqResult<String> {
     let (q, ts, uid) = self.get_queue(&qname, true)?;
-    let uid = uid.unwrap();
+    let uid = uid.unwrap(); // TODO: return error here, don't panic
     let delay = delay.unwrap_or(q.delay);
 
-    if q.maxsize != -1 && message.len() > q.maxsize as usize {
-      // TODO: len() is utf8 chars; maxsize is bytes
+    if q.maxsize != -1 && message.as_bytes().len() > q.maxsize as usize {
       let custom_error = std::io::Error::new(std::io::ErrorKind::Other, "Message is too long");
       let redis_err = RedisError::from(custom_error);
       return Err(redis_err.into());
@@ -259,23 +234,10 @@ impl Rsmq {
     let key = format!("{}:{}", self.name_space, qname);
     let qky = format!("{}:Q", key);
     let con = self.pool.get()?;
-    redis::pipe()
-      .atomic()
-      .cmd("ZADD")
-      .arg(&key)
-      .arg(ts + delay * 1000)
-      .arg(&uid)
-      .ignore()
-      .cmd("HSET")
-      .arg(&qky)
-      .arg(&uid)
-      .arg(message)
-      .ignore()
-      .cmd("HINCRBY")
-      .arg(&qky)
-      .arg("totalsent")
-      .arg(1)
-      .ignore()
+    redis::pipe().atomic()
+      .cmd("ZADD").arg(&key).arg(ts + delay * 1000).arg(&uid).ignore()
+      .cmd("HSET") .arg(&qky) .arg(&uid) .arg(message) .ignore()
+      .cmd("HINCRBY") .arg(&qky) .arg("totalsent") .arg(1) .ignore()
       .query::<()>(con.deref())?;
     Ok(uid)
   }
@@ -300,6 +262,37 @@ impl Rsmq {
     } else {
       Ok(false)
     }
+  }
+
+  pub fn pop_message(&self, qname: &str) -> RsmqResult<Message> {
+    const LUA: &'static str = r##"
+      local msg = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", KEYS[2], "LIMIT", "0", "1")
+			if #msg == 0 then
+				return {}
+			end
+			redis.call("HINCRBY", KEYS[1] .. ":Q", "totalrecv", 1)
+			local mbody = redis.call("HGET", KEYS[1] .. ":Q", msg[1])
+			local rc = redis.call("HINCRBY", KEYS[1] .. ":Q", msg[1] .. ":rc", 1)
+			local o = {msg[1], mbody, rc}
+			if rc==1 then
+				table.insert(o, KEYS[2])
+			else			
+				local fr = redis.call("HGET", KEYS[1] .. ":Q", msg[1] .. ":fr")	
+				table.insert(o, fr)
+			end
+			redis.call("ZREM", KEYS[1], msg[1])
+			redis.call("HDEL", KEYS[1] .. ":Q", msg[1], msg[1] .. ":rc", msg[1] .. ":fr")
+			return o    
+    "##;
+    let (_, ts, _) = self.get_queue(qname, false)?;
+    let qky = format!("{}:{}", self.name_space, qname);
+    let con = self.pool.get()?;
+    let m: Message = redis::Script::new(LUA)
+      .key(qky)
+      .key(ts)
+      .invoke(con.deref())?;
+    Ok(m)
+    
   }
 
   pub fn receive_message(&self, qname: &str, hidefor: Option<u64>) -> RsmqResult<Message> {
