@@ -130,11 +130,11 @@ impl Rsmq {
     Ok(Rsmq { pool: pool })
   }
 
-  pub fn create_queue(&self, opts: Queue) -> RsmqResult<usize> {
+  pub fn create_queue(&self, opts: Queue) -> RsmqResult<u8> {
     let con = self.pool.get()?;
     let key = format!("{}:{}:Q", REDIS_NS, opts.qname);
     let (ts, _): (u32, u32) = redis::cmd("TIME").query(con.deref())?;
-    let res = redis::pipe()
+    let (res,): (u8,) = redis::pipe()
       .atomic()
       .cmd("HSETNX")
       .arg(&key)
@@ -164,8 +164,8 @@ impl Rsmq {
       .cmd("SADD")
       .arg(format!("{}:QUEUES", REDIS_NS))
       .arg(opts.qname)
-      .query::<Vec<usize>>(con.deref())?;
-    Ok(res[0])
+      .query(con.deref())?;
+    Ok(res)
   }
 
   pub fn delete_queue(&self, qname: &str) -> RsmqResult<Value> {
@@ -189,9 +189,9 @@ impl Rsmq {
   }
 
   fn get_queue(&self, qname: &str, set_uid: bool) -> RsmqResult<(Queue, u64, Option<String>)> {
-    let qkey = format!("{}:{}:Q", REDIS_NS, qname);
     let con = self.pool.get()?;
-    let out: Vec<Vec<u64>> = redis::pipe()
+    let qkey = format!("{}:{}:Q", REDIS_NS, qname);
+    let ((vt, delay, maxsize), (secs, micros)): ((u64, u64, i64), (u64, u64)) = redis::pipe()
       .atomic()
       .cmd("HMGET")
       .arg(qkey)
@@ -200,19 +200,13 @@ impl Rsmq {
       .arg("maxsize")
       .cmd("TIME")
       .query(con.deref())?;
-    if out[0].len() == 0 {
-      // Queue not found so redis returns `[]`
-      return Err(std::io::Error::new(std::io::ErrorKind::Other, "No such queue").into());
-    }
-    let qattrs = &out[0];
-    let secs = out[1][0];
-    let micros = out[1][1];
+
     let ts = (secs * 1_000_000 + micros) / 1_000; // Epoch time in milliseconds
     let q = Queue {
       qname: qname.into(),
-      vt: qattrs[0],
-      delay: qattrs[1],
-      maxsize: qattrs[2] as i64,
+      vt: vt,
+      delay: delay,
+      maxsize: maxsize,
       ..Default::default()
     };
     // This is a bit crazy. The JS version calls getQueue with the `set_uid` set to `true` only from `sendMessage`
@@ -285,10 +279,9 @@ impl Rsmq {
     Ok(uid)
   }
 
-  pub fn delete_message(&self, qname: &str, msgid: &str) -> RsmqResult<u64> {
+  pub fn delete_message(&self, qname: &str, msgid: &str) -> RsmqResult<bool> {
     let key = format!("{}:{}", REDIS_NS, qname);
     let con = self.pool.get()?;
-    // let res : Vec<u64> = redis::pipe().atomic()
     let (delete_count, deleted_fields_count): (u32, u32) = redis::pipe()
       .atomic()
       .cmd("ZREM")
@@ -302,9 +295,9 @@ impl Rsmq {
       .query(con.deref())?;
 
     if delete_count == 1 && deleted_fields_count > 0 {
-      Ok(1)
+      Ok(true)
     } else {
-      Ok(0)
+      Ok(false)
     }
   }
 
@@ -327,7 +320,7 @@ impl Rsmq {
 				table.insert(o, fr)
 			end
 			return o
-            "##;
+      "##;
     let (q, ts, _) = self.get_queue(&qname, false)?;
     let hidefor = hidefor.unwrap_or(q.vt);
     let qky = format!("{}:{}", REDIS_NS, qname);
