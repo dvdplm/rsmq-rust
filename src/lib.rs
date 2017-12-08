@@ -1,4 +1,4 @@
-extern crate num_bigint;
+extern crate radix;
 extern crate r2d2;
 extern crate r2d2_redis;
 extern crate rand;
@@ -7,7 +7,6 @@ extern crate redis;
 use std::default::Default;
 use std::error::Error;
 use std::ops::Deref;
-use num_bigint::BigUint;
 use redis::{from_redis_value, RedisError, RedisResult, Value};
 use r2d2_redis::RedisConnectionManager;
 use r2d2::Pool;
@@ -178,7 +177,8 @@ impl Rsmq {
       .cmd("TIME")
       .query(con.deref())?;
 
-    let ts = (secs * 1_000_000 + micros) / 1_000; // Epoch time in milliseconds
+    let ts_micros = secs * 1_000_000 + micros;
+    let ts = ts_micros / 1_000; // Epoch time in milliseconds
     let q = Queue {
       qname: qname.into(),
       vt: vt,
@@ -190,10 +190,7 @@ impl Rsmq {
     // where it is used to write the timestamp+random stuff that constituates the (sort)key. This is just a port of
     // that behavior. I don't understand why it is baked in with the queue attrib fetch.
     let uid = if set_uid {
-      let ts_str = format!("{}{:06}", secs, micros); // This is a bit nuts; double check JS behavior
-      let ts_rad36 = BigUint::parse_bytes(ts_str.as_bytes(), 10)
-        .unwrap()
-        .to_str_radix(36);
+      let ts_rad36 = radix::RadixNum::from(ts_micros).with_radix(36).unwrap().as_str().to_lowercase().to_string();
       Some(ts_rad36 + &make_id_22())
     } else {
       None

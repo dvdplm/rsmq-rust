@@ -6,7 +6,7 @@ use rsmq::*;
 
 #[test]
 fn criterion_benchmark() {
-  let rsmq = Rsmq::new("redis://127.0.0.1/").expect("Can't instantiate RSMQ");
+  let rsmq = Rsmq::new("redis://127.0.0.1/", "rsmq").expect("Can't instantiate RSMQ");
   let q = Queue::new("bench-queue", 60, 0, 1200);
   rsmq.create_queue(q).expect("queue creation failed");
   static MSG_BODY: &str =
