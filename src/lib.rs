@@ -1,6 +1,6 @@
 extern crate num_bigint;
 extern crate r2d2;
-extern crate r2d2_redis_patch as r2d2_redis;
+extern crate r2d2_redis;
 extern crate rand;
 extern crate redis;
 
