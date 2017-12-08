@@ -133,25 +133,25 @@ impl Rsmq {
 
   pub fn create_queue(&self, opts: Queue) -> RsmqResult<u8> {
     let con = self.pool.get()?;
-    let key = format!("{}:{}:Q", self.name_space, opts.qname);
+    let qky = self.queue_hash_key(&opts.qname);
     let (ts, _): (u32, u32) = redis::cmd("TIME").query(con.deref())?;
     let (res,): (u8,) = redis::pipe()
       .atomic()
-      .cmd("HSETNX").arg(&key).arg("vt").arg(opts.vt) .ignore()
-      .cmd("HSETNX").arg(&key).arg("delay").arg(opts.delay) .ignore()
-      .cmd("HSETNX").arg(&key).arg("maxsize").arg(opts.maxsize) .ignore()
-      .cmd("HSETNX").arg(&key).arg("totalrecv").arg(0) .ignore()
-      .cmd("HSETNX").arg(&key).arg("totalsent").arg(0) .ignore()
-      .cmd("HSETNX").arg(&key).arg("created").arg(ts) .ignore()
-      .cmd("HSETNX").arg(&key).arg("modified").arg(ts) .ignore()
-      .cmd("SADD")  .arg(format!("{}:QUEUES", self.name_space)) .arg(opts.qname)
+      .cmd("HSETNX").arg(&qky).arg("vt")        .arg(opts.vt) .ignore()
+      .cmd("HSETNX").arg(&qky).arg("delay")     .arg(opts.delay) .ignore()
+      .cmd("HSETNX").arg(&qky).arg("maxsize")   .arg(opts.maxsize) .ignore()
+      .cmd("HSETNX").arg(&qky).arg("totalrecv") .arg(0) .ignore()
+      .cmd("HSETNX").arg(&qky).arg("totalsent") .arg(0) .ignore()
+      .cmd("HSETNX").arg(&qky).arg("created")   .arg(ts) .ignore()
+      .cmd("HSETNX").arg(&qky).arg("modified")  .arg(ts) .ignore()
+      .cmd("SADD")  .arg(format!("{}:QUEUES", self.name_space)).arg(opts.qname)
       .query(con.deref())?;
     Ok(res)
   }
 
   pub fn delete_queue(&self, qname: &str) -> RsmqResult<Value> {
     let con = self.pool.get()?;
-    let key = format!("{}:{}", self.name_space, qname);
+    let key = self.message_zset_key(qname);
     redis::pipe()
             .atomic()
             .cmd("DEL").arg(format!("{}:Q", &key)).ignore() // The queue hash
@@ -171,7 +171,7 @@ impl Rsmq {
 
   fn get_queue(&self, qname: &str, set_uid: bool) -> RsmqResult<(Queue, u64, Option<String>)> {
     let con = self.pool.get()?;
-    let qkey = format!("{}:{}:Q", self.name_space, qname);
+    let qkey = self.queue_hash_key(qname);
     let ((vt, delay, maxsize), (secs, micros)): ((u64, u64, i64), (u64, u64)) = redis::pipe()
       .atomic()
       .cmd("HMGET").arg(qkey).arg("vt").arg("delay").arg("maxsize")
@@ -210,11 +210,11 @@ impl Rsmq {
 			redis.call("ZADD", KEYS[1], KEYS[3], KEYS[2])
 			return 1"#;
     let (_, ts, _) = self.get_queue(&qname, false)?;
-    let queue_key = format!("{}:{}", self.name_space, qname);
+    let key = self.message_zset_key(qname);
     let expires_at = ts + hidefor * 1000u64;
     let con = self.pool.get()?;
     redis::Script::new(LUA)
-      .key(queue_key)
+      .key(key)
       .key(msgid)
       .key(expires_at)
       .invoke::<()>(con.deref())?;
@@ -231,8 +231,8 @@ impl Rsmq {
       let redis_err = RedisError::from(custom_error);
       return Err(redis_err.into());
     }
-    let key = format!("{}:{}", self.name_space, qname);
-    let qky = format!("{}:Q", key);
+    let key = self.message_zset_key(qname);
+    let qky = self.queue_hash_key(qname);
     let con = self.pool.get()?;
     redis::pipe().atomic()
       .cmd("ZADD").arg(&key).arg(ts + delay * 1000).arg(&uid).ignore()
@@ -243,7 +243,7 @@ impl Rsmq {
   }
 
   pub fn delete_message(&self, qname: &str, msgid: &str) -> RsmqResult<bool> {
-    let key = format!("{}:{}", self.name_space, qname);
+    let key = self.message_zset_key(qname);
     let con = self.pool.get()?;
     let (delete_count, deleted_fields_count): (u32, u32) = redis::pipe()
       .atomic()
@@ -285,10 +285,10 @@ impl Rsmq {
 			return o    
     "##;
     let (_, ts, _) = self.get_queue(qname, false)?;
-    let qky = format!("{}:{}", self.name_space, qname);
+    let key = self.message_zset_key(qname);
     let con = self.pool.get()?;
     let m: Message = redis::Script::new(LUA)
-      .key(qky)
+      .key(key)
       .key(ts)
       .invoke(con.deref())?;
     Ok(m)
@@ -317,12 +317,12 @@ impl Rsmq {
       "##;
     let (q, ts, _) = self.get_queue(&qname, false)?;
     let hidefor = hidefor.unwrap_or(q.vt);
-    let qky = format!("{}:{}", self.name_space, qname);
+    let key = self.message_zset_key(qname);
     let expires_at = ts + hidefor * 1000u64;
     let con = self.pool.get()?;
 
     let m: Message = redis::Script::new(LUA)
-      .key(qky)
+      .key(key)
       .key(ts)
       .key(expires_at)
       .invoke(con.deref())?;
@@ -332,8 +332,8 @@ impl Rsmq {
   pub fn get_queue_attributes(&self, qname: &str) -> RsmqResult<Queue> {
     // TODO: validate qname
     let con = self.pool.get()?;
-    let key = format!("{}:{}", self.name_space, qname);
-    let qkey = format!("{}:{}:Q", self.name_space, qname);
+    let key = self.message_zset_key(qname);
+    let qkey = self.queue_hash_key(qname);
     // TODO: use transaction here to grab the time and then run the data fetch
     let (time, _): (String, u32) = redis::cmd("TIME").query(con.deref())?;
     let ts_str = format!("{}000", time);
