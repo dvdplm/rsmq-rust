@@ -331,30 +331,17 @@ impl Rsmq {
 
   pub fn get_queue_attributes(&self, qname: &str) -> RsmqResult<Queue> {
     // TODO: validate qname
+    let con = self.pool.get()?;
     let key = format!("{}:{}", self.name_space, qname);
     let qkey = format!("{}:{}:Q", self.name_space, qname);
-    let con = self.pool.get()?;
     // TODO: use transaction here to grab the time and then run the data fetch
     let (time, _): (String, u32) = redis::cmd("TIME").query(con.deref())?;
     let ts_str = format!("{}000", time);
     // [[60, 10, 1200, 5, 7, 1512492628, 1512492628], 10, 9]
-    let out: ((u64, u64, i64, u64, u64, u64, u64), u64, u64) = redis::pipe()
-      .atomic()
-      .cmd("HMGET")
-      .arg(qkey)
-      .arg("vt")
-      .arg("delay")
-      .arg("maxsize")
-      .arg("totalrecv")
-      .arg("totalsent")
-      .arg("created")
-      .arg("modified")
-      .cmd("ZCARD")
-      .arg(&key)
-      .cmd("ZCOUNT")
-      .arg(&key)
-      .arg(ts_str)
-      .arg("+inf")
+    let out: ((u64, u64, i64, u64, u64, u64, u64), u64, u64) = redis::pipe().atomic()
+      .cmd("HMGET").arg(qkey).arg("vt").arg("delay").arg("maxsize").arg("totalrecv").arg("totalsent").arg("created").arg("modified")
+      .cmd("ZCARD").arg(&key)
+      .cmd("ZCOUNT").arg(&key).arg(ts_str).arg("+inf")
       .query(con.deref())?;
     let (vt, delay, maxsize, totalrecv, totalsent, created, modified) = out.0;
     let msg_count = out.1;
@@ -371,6 +358,30 @@ impl Rsmq {
       msgs:       msg_count,
       hiddenmsgs: hidden_msg_count,
     };
+    Ok(q)
+  }
+  fn queue_hash_key(&self, qname: &str) -> String {
+    format!("{}:{}:Q", self.name_space, qname)
+  }
+
+  fn message_zset_key(&self, qname: &str) -> String {
+    format!("{}:{}", self.name_space, qname)
+  }
+  pub fn set_queue_attributes(&self, qname: &str, vt: Option<u64>, delay: Option<u64>, maxsize: Option<i64>) -> RsmqResult<Queue> {
+    let con = self.pool.get()?;
+    let qkey = self.queue_hash_key(qname);
+    let mut pipe = redis::pipe();
+    if vt.is_some() {
+      pipe.cmd("HSET").arg(&qkey).arg("vt").arg(vt).ignore();
+    }
+    if delay.is_some() {
+      pipe.cmd("HSET").arg(&qkey).arg("delay").arg(delay).ignore();
+    }
+    if maxsize.is_some() {
+      pipe.cmd("HSET").arg(&qkey).arg("maxsize").arg(maxsize).ignore();
+    }
+    pipe.atomic().query::<()>(con.deref())?;
+    let q = self.get_queue_attributes(qname)?;
     Ok(q)
   }
 }
