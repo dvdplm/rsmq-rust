@@ -6,7 +6,7 @@ fn main() {
   let rsmq = Rsmq::new("redis://127.0.0.1/", "rsmq").expect("Can't instantiate RSMQ");
   println!("[main] Have rsmq instance: {:?}", rsmq);
 
-  let queue = Queue::new("my-queue", 60, 10, 1200);
+  let queue = Queue::new("my-queue", None, Some(10), None);
   rsmq.create_queue(queue.clone()).expect("queue creation failed");
   println!("[main] created queue {}", &queue.qname);
   

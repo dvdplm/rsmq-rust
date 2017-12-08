@@ -28,14 +28,14 @@ pub struct Queue {
 }
 
 impl Queue {
-  pub fn new(qname: &str, vt: u64, delay: u64, maxsize: i64) -> Queue {
+  pub fn new(qname: &str, vt: Option<u64>, delay: Option<u64>, maxsize: Option<i64>) -> Queue {
     let mut q = Queue {
       ..Default::default()
     };
     q.qname = qname.into();
-    q.vt = vt;
-    q.delay = delay;
-    q.maxsize = maxsize;
+    q.vt = vt.unwrap_or(30);
+    q.delay = delay.unwrap_or(0);
+    q.maxsize = maxsize.unwrap_or(65536);
     q
   }
 }
@@ -116,7 +116,7 @@ pub struct Rsmq {
 }
 
 impl std::fmt::Debug for Rsmq {
-  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, "{:?}", self.pool) }
+  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, "redis namespace: {}, {:?}", self.name_space, self.pool) }
 }
 
 impl Rsmq {
