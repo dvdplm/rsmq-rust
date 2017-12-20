@@ -294,7 +294,7 @@ impl Rsmq {
 
   pub fn receive_message(&self, qname: &str, hidefor: Option<u64>) -> RsmqResult<Message> {
     const LUA: &'static str = r##"
-            local msg = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", KEYS[2], "LIMIT", "0", "1")
+      local msg = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", KEYS[2], "LIMIT", "0", "1")
 			if #msg == 0 then
 				return {}
 			end
@@ -306,7 +306,7 @@ impl Rsmq {
 			if rc==1 then
 				redis.call("HSET", KEYS[1] .. ":Q", msg[1] .. ":fr", KEYS[2])
 				table.insert(o, KEYS[2])
-			else			
+			else
 				local fr = redis.call("HGET", KEYS[1] .. ":Q", msg[1] .. ":fr")
 				table.insert(o, fr)
 			end
@@ -357,13 +357,7 @@ impl Rsmq {
     };
     Ok(q)
   }
-  fn queue_hash_key(&self, qname: &str) -> String {
-    format!("{}:{}:Q", self.name_space, qname)
-  }
 
-  fn message_zset_key(&self, qname: &str) -> String {
-    format!("{}:{}", self.name_space, qname)
-  }
   pub fn set_queue_attributes(&self, qname: &str, vt: Option<u64>, delay: Option<u64>, maxsize: Option<i64>) -> RsmqResult<Queue> {
     let con = self.pool.get()?;
     let qkey = self.queue_hash_key(qname);
@@ -380,6 +374,14 @@ impl Rsmq {
     pipe.atomic().query::<()>(con.deref())?;
     let q = self.get_queue_attributes(qname)?;
     Ok(q)
+  }
+
+  fn queue_hash_key(&self, qname: &str) -> String {
+    format!("{}:{}:Q", self.name_space, qname)
+  }
+
+  fn message_zset_key(&self, qname: &str) -> String {
+    format!("{}:{}", self.name_space, qname)
   }
 }
 
