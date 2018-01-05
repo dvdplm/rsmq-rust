@@ -3,13 +3,15 @@ extern crate r2d2;
 extern crate r2d2_redis;
 extern crate rand;
 extern crate redis;
+#[macro_use] extern crate failure;
 
 use std::default::Default;
-use std::error::Error;
 use std::ops::Deref;
 use redis::{from_redis_value, RedisError, RedisResult, Value};
+use redis::ErrorKind as RedisErrorKind;
 use r2d2_redis::RedisConnectionManager;
 use r2d2::Pool;
+use failure::Error;
 
 const PONG: &str = "PONG";
 
@@ -29,9 +31,7 @@ pub struct Queue {
 
 impl Queue {
   pub fn new(qname: &str, vt: Option<u64>, delay: Option<u64>, maxsize: Option<i64>) -> Queue {
-    let mut q = Queue {
-      ..Default::default()
-    };
+    let mut q = Queue { ..Default::default() };
     q.qname = qname.into();
     q.vt = vt.unwrap_or(30);
     q.delay = delay.unwrap_or(0);
@@ -77,37 +77,31 @@ impl Message {
     }
   }
 }
+
 impl redis::FromRedisValue for Message {
   fn from_redis_value(v: &Value) -> RedisResult<Message> {
     match *v {
       Value::Bulk(ref items) => {
         if items.len() == 0 {
-          // TODO: figure out error handling and get rid of this awefulness
-          let custom_error = std::io::Error::new(std::io::ErrorKind::Other, "No messages to receive");
-          let redis_err = RedisError::from(custom_error);
-          return Err(redis_err);
+          return Err(RedisError::from( (RedisErrorKind::IoError, "No messages to receive") ))
         }
         let mut m = Message::new();
         m.id = from_redis_value(&items[0])?;
         m.message = from_redis_value(&items[1])?;
         m.rc = from_redis_value(&items[2])?;
         m.fr = from_redis_value(&items[3])?;
-        // TODO: figure out how to wrap a std::num::ParseIntError in a RedisError so we can use `?` here
-        m.sent = u64::from_str_radix(&m.id[0..10], 36).expect("could not convert first 10 chars from redis response to timestamp");
+        m.sent = match u64::from_str_radix(&m.id[0..10], 36) {
+          Ok(ts) => ts,
+          Err(e) => return Err(RedisError::from( (RedisErrorKind::TypeError, "timestamp parsing error", format!("Could not convert '{:?}' to a timestamp. Error: {}", &m.id[0..10], e)) ) )
+        };
         Ok(m)
       }
       _ => {
-        // println!("Oh boy, what even are you? {:?}", v);
-        // TODO: figure out how to return something sensible here
-        let custom_error = std::io::Error::new(std::io::ErrorKind::Other, "Redis did not return a bulk");
-        let redis_err = RedisError::from(custom_error);
-        return Err(redis_err);
+        Err(RedisError::from( (RedisErrorKind::IoError, "Redis did not return a Value::Bulk") ))
       }
     }
   }
 }
-
-pub type RsmqResult<T> = Result<T, Box<Error>>;
 
 // #[derive(Debug)]
 pub struct Rsmq {
@@ -116,11 +110,13 @@ pub struct Rsmq {
 }
 
 impl std::fmt::Debug for Rsmq {
-  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, "redis namespace: {}, {:?}", self.name_space, self.pool) }
+  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { 
+    write!(f, "redis namespace: {}, {:?}", self.name_space, self.pool)
+  }
 }
 
 impl Rsmq {
-  pub fn new<T: redis::IntoConnectionInfo>(params: T, name_space: &str) -> Result<Rsmq, Box<Error>> {
+  pub fn new<T: redis::IntoConnectionInfo>(params: T, name_space: &str) -> Result<Rsmq, Error> {
     let manager = RedisConnectionManager::new(params)?;
     let pool = r2d2::Pool::new(manager)?;
     let con = pool.get()?;
@@ -130,7 +126,7 @@ impl Rsmq {
     Ok(Rsmq { pool: pool, name_space: ns})
   }
 
-  pub fn create_queue(&self, opts: Queue) -> RsmqResult<u8> {
+  pub fn create_queue(&self, opts: Queue) -> Result<u8, Error> {
     let con = self.pool.get()?;
     let qky = self.queue_hash_key(&opts.qname);
     let (ts, _): (u32, u32) = redis::cmd("TIME").query(con.deref())?;
@@ -148,7 +144,7 @@ impl Rsmq {
     Ok(res)
   }
 
-  pub fn delete_queue(&self, qname: &str) -> RsmqResult<Value> {
+  pub fn delete_queue(&self, qname: &str) -> Result<Value, Error> {
     let con = self.pool.get()?;
     let key = self.message_zset_key(qname);
     redis::pipe()
@@ -159,7 +155,7 @@ impl Rsmq {
             .query(con.deref()).map_err(|e| e.into())
   }
 
-  pub fn list_queues(&self) -> RsmqResult<Vec<String>> {
+  pub fn list_queues(&self) -> Result<Vec<String>, Error> {
     let con = self.pool.get()?;
     let key = format!("{}:QUEUES", self.name_space);
     redis::cmd("SMEMBERS")
@@ -168,7 +164,7 @@ impl Rsmq {
       .map_err(|e| e.into())
   }
 
-  fn get_queue(&self, qname: &str, set_uid: bool) -> RsmqResult<(Queue, u64, Option<String>)> {
+  fn get_queue(&self, qname: &str, set_uid: bool) -> Result<(Queue, u64, Option<String>), Error> {
     let con = self.pool.get()?;
     let qkey = self.queue_hash_key(qname);
     let ((vt, delay, maxsize), (secs, micros)): ((u64, u64, i64), (u64, u64)) = redis::pipe()
@@ -191,6 +187,8 @@ impl Rsmq {
     // that behavior. I don't understand why it is baked in with the queue attrib fetch.
     let uid = if set_uid {
       let ts_rad36 = radix::RadixNum::from(ts_micros).with_radix(36).unwrap().as_str().to_lowercase().to_string();
+      // TODO: make this work
+      // let ts_rad36 = radix::RadixNum::from(ts_micros).with_radix(36)?.as_str().to_lowercase().to_string();
       Some(ts_rad36 + &make_id_22())
     } else {
       None
@@ -198,7 +196,7 @@ impl Rsmq {
     Ok((q, ts, uid))
   }
 
-  pub fn change_message_visibility(&self, qname: &str, msgid: &str, hidefor: u64) -> RsmqResult<u64> {
+  pub fn change_message_visibility(&self, qname: &str, msgid: &str, hidefor: u64) -> Result<u64, Error> {
     const LUA: &'static str = r#"
             local msg = redis.call("ZSCORE", KEYS[1], KEYS[2])
 			if not msg then
@@ -218,9 +216,9 @@ impl Rsmq {
     Ok(expires_at)
   }
 
-  pub fn send_message(&self, qname: &str, message: &str, delay: Option<u64>) -> RsmqResult<String> {
+  pub fn send_message(&self, qname: &str, message: &str, delay: Option<u64>) -> Result<String, Error> {
     let (q, ts, uid) = self.get_queue(&qname, true)?;
-    let uid = uid.unwrap(); // TODO: return error here, don't panic
+    let uid = uid.ok_or(format_err!("Did not get a proper uid back from Redis"))?;
     let delay = delay.unwrap_or(q.delay);
 
     if q.maxsize != -1 && message.as_bytes().len() > q.maxsize as usize {
@@ -239,7 +237,7 @@ impl Rsmq {
     Ok(uid)
   }
 
-  pub fn delete_message(&self, qname: &str, msgid: &str) -> RsmqResult<bool> {
+  pub fn delete_message(&self, qname: &str, msgid: &str) -> Result<bool, Error> {
     let key = self.message_zset_key(qname);
     let con = self.pool.get()?;
     let (delete_count, deleted_fields_count): (u32, u32) = redis::pipe()
@@ -261,7 +259,7 @@ impl Rsmq {
     }
   }
 
-  pub fn pop_message(&self, qname: &str) -> RsmqResult<Message> {
+  pub fn pop_message(&self, qname: &str) -> Result<Message, Error> {
     const LUA: &'static str = r##"
       local msg = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", KEYS[2], "LIMIT", "0", "1")
 			if #msg == 0 then
@@ -292,7 +290,7 @@ impl Rsmq {
     
   }
 
-  pub fn receive_message(&self, qname: &str, hidefor: Option<u64>) -> RsmqResult<Message> {
+  pub fn receive_message(&self, qname: &str, hidefor: Option<u64>) -> Result<Message, Error> {
     const LUA: &'static str = r##"
       local msg = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", KEYS[2], "LIMIT", "0", "1")
 			if #msg == 0 then
@@ -326,7 +324,7 @@ impl Rsmq {
     Ok(m)
   }
 
-  pub fn get_queue_attributes(&self, qname: &str) -> RsmqResult<Queue> {
+  pub fn get_queue_attributes(&self, qname: &str) -> Result<Queue, Error> {
     // TODO: validate qname
     let con = self.pool.get()?;
     let key = self.message_zset_key(qname);
@@ -358,7 +356,7 @@ impl Rsmq {
     Ok(q)
   }
 
-  pub fn set_queue_attributes(&self, qname: &str, vt: Option<u64>, delay: Option<u64>, maxsize: Option<i64>) -> RsmqResult<Queue> {
+  pub fn set_queue_attributes(&self, qname: &str, vt: Option<u64>, delay: Option<u64>, maxsize: Option<i64>) -> Result<Queue, Error> {
     let con = self.pool.get()?;
     let qkey = self.queue_hash_key(qname);
     let mut pipe = redis::pipe();

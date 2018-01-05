@@ -94,15 +94,15 @@ fn pop_message() {
   rsmq.delete_queue(qname).expect("no queue deleted");
   rsmq.create_queue(Queue::new(qname, None, None, None)).expect("no queue for you!");
 
-  let mid = rsmq.send_message(qname, "poppy message", None);
-  assert!(mid.is_ok());
+  let msg_id = rsmq.send_message(qname, "poppy message", None);
+  assert!(msg_id.is_ok());
 
   let queue_stats_before = rsmq.get_queue_attributes(qname).expect("fetch queue stats BEFORE failed");
   let popped = rsmq.pop_message(qname);
   let queue_stats_after = rsmq.get_queue_attributes(qname).expect("fetch queue stats AFTER failed");
 
   assert!(popped.is_ok());
-  assert_eq!(popped.unwrap().id, mid.unwrap());
+  assert_eq!(popped.unwrap().id, msg_id.unwrap());
   assert_eq!(queue_stats_after.msgs, 0);
   assert_eq!(queue_stats_before.msgs, 1);
   assert_eq!(queue_stats_after.hiddenmsgs, 0);
@@ -114,14 +114,14 @@ fn receive_message() {
   let qname = "receive-message-q";
   rsmq.delete_queue(qname).expect("no queue deleted");
   rsmq.create_queue(Queue::new(qname, None, None, None)).expect("no queue for you!");
-  let mid = rsmq.send_message(qname, "reccy message", Some(0));
-  assert!(mid.is_ok());
-  std::thread::sleep(std::time::Duration::from_millis(800)); // wait for messages to become unhidden
+  let msg_id = rsmq.send_message(qname, "a message to receive", Some(0));
+  assert!(msg_id.is_ok());
+  std::thread::sleep(std::time::Duration::from_millis(1000)); // wait for messages to become unhidden
 
   let queue_stats_before = rsmq.get_queue_attributes(qname).expect("fetch queue stats BEFORE failed");
   let reserved = rsmq.receive_message(qname, None);
   assert!(reserved.is_ok());
-  assert_eq!(reserved.unwrap().id, mid.unwrap());
+  assert_eq!(reserved.unwrap().id, msg_id.unwrap());
   let queue_stats_after = rsmq.get_queue_attributes(qname).expect("fetch queue stats AFTER failed");
 
   assert_eq!(queue_stats_before.msgs, 1);
