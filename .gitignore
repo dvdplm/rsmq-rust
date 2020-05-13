@@ -6,3 +6,5 @@ Cargo.lock
 misc/
 .DS_Store
 .criterion
+.idea
+.vscode
